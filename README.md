@@ -1,153 +1,118 @@
-# SpreadsheetApp
+# 📊 SpreadsheetApp — WorkElate Internship Submission
 
-A modern web application built with React and Vite for creating and managing spreadsheets.
+A React + Vite spreadsheet with a custom formula engine. This submission implements three production-grade features: Column Sort & Filter, Multi-Cell Copy/Paste, and LocalStorage Persistence.
 
-## Prerequisites
+---
 
-Before you begin, ensure you have the following installed on your system:
-
-- **Node.js** (version 18 or higher) - [Download](https://nodejs.org/)
-- **npm** (comes with Node.js) or **yarn**
-- **Git** - [Download](https://git-scm.com/)
-
-## Getting Started
-
-### 1. Clone the Repository
-
-```bash
-git clone https://github.com/tauhidst07/spreadhsheet.git
-cd SpreadsheetApp
-```
-
-### 2. Install Dependencies
-
-Install all required project dependencies:
+## 🚀 Getting Started
 
 ```bash
 npm install
+npm run dev   # → http://localhost:5173
 ```
 
-Or if you prefer yarn:
+---
 
-```bash
-yarn install
+## ✅ Features Implemented
+
+### Task 1 — Column Sort & Filter
+
+**How to use:**
+- **Click a column header label** (e.g., `A`, `B`) to sort: Ascending → Descending → None (3-way toggle).
+- **Click the `▾` icon** on any column header to open an Excel-style filter dropdown.
+- In the dropdown, uncheck values to hide rows containing them. Click **"Select All"** to clear the filter for that column.
+- A **"✕ Clear Sort & Filters"** button appears in the top header bar when any sort/filter is active.
+
+**Key Decisions:**
+
+| Decision | Rationale |
+|---|---|
+| **View-layer only sorting** | The `visibleRows` array (a `useMemo` over row indices) is what gets sorted/filtered. The engine's cell data at `[r, c]` is **never moved**, so formula references like `=A1+B1` always point to the correct underlying data. |
+| **Sort on computed values** | `engine.getCell(r, col).computed` is used for sorting, so if a cell contains `=SUM(A1:A5)`, sorting uses the *result* (e.g., `150`), not the formula string. |
+| **Filter hides, not deletes** | Filtered rows simply have their indices excluded from `visibleRows`. The data remains intact and restores when the filter is cleared. |
+| **Reversible** | Clearing all filters returns to the original order because the engine data was never changed. |
+
+---
+
+### Task 2 — Multi-Cell Copy & Paste
+
+**How to use:**
+- **Click** a cell to select it. **Drag** or **Shift+Click** to select a range (shows blue highlight).
+- **Ctrl+C** copies computed values as TSV (Tab-Separated Values) — the same format Excel and Google Sheets use.
+- **Ctrl+V** pastes TSV data starting at the top-left of the current selection. Works with content copied from **Excel or Google Sheets**.
+- **Delete** or **Backspace** clears all cells in the current selection.
+- **Ctrl+Z** undoes an entire multi-cell paste in a **single step**.
+
+**Key Decisions:**
+
+| Decision | Rationale |
+|---|---|
+| **Range Selection Model** | Tracks `{ anchor, active }` — the corner where the mouse went down, and the corner it dragged to. `selectionRange` is derived by clamping min/max of both. This mirrors how Excel internally represents a selection. |
+| **TSV format for clipboard** | Tab (`\t`) separates columns, newline (`\n`) separates rows. This is the standard interchange format recognized by Excel, Google Sheets, and LibreOffice Calc. |
+| **Ctrl+C copies computed values** | Per the spec: if a cell has `=SUM(A1:A5)`, we copy `150`, not `=SUM(A1:A5)`. Preserving formula semantics across apps is not possible, so computed values are the correct choice. |
+| **`batchSetCells` in engine** | A new public API added to `core.js`. It captures *all* previous values before making *any* changes, and pushes a single `{ type: 'batch', changes: [...] }` entry to the undo stack. One Ctrl+Z undoes the entire paste. |
+| **`navigator.clipboard` API** | Used for cross-app compatibility. Falls back to an internal clipboard ref if the Clipboard API is denied (e.g., non-HTTPS). |
+
+---
+
+### Task 3 — Local Storage Persistence
+
+**How it works:**
+- Any change (typing, paste, formatting) triggers an auto-save after **500ms of inactivity** (debounced).
+- On page reload, the app reads `localStorage` and restores all cell values, formulas, styles, and grid dimensions before the first render.
+- Undo/redo history is **not** persisted — clearing the page gives a fresh undo stack while keeping your data.
+
+**Key Decisions:**
+
+| Decision | Rationale |
+|---|---|
+| **Schema versioning** | The `exportState()` function writes `{ version: 1, rows, cols, cells }`. On load, `importState()` rejects data with a mismatched version number, preventing crashes from format changes. |
+| **Error recovery** | The load is wrapped in `try/catch`. If the data is corrupted (e.g., truncated JSON), it is silently discarded and `localStorage.removeItem()` is called to clear the bad data. |
+| **Size check before save** | Before writing, the serialized string length is checked against ~4.5MB (below the typical 5MB quota). Oversized data is skipped with a console warning. |
+| **Styles persisted separately** | Cell styles (`bold`, `italic`, `bg`, `color`, etc.) live in React state as `cellStyles`, so they are saved alongside engine data in a single JSON object. |
+| **Undo/redo NOT persisted** | The undo stack lives in the engine's closure. It is not exported, so reloading the page starts with a clean history — which is the expected behavior (you can't Ctrl+Z changes from a previous session). |
+
+---
+
+## 🏗️ Architecture & Key Design Choices
+
+```
+src/
+├── engine/
+│   └── core.js       ← Pure JS formula engine (no React). Handles:
+│                        - Cell storage (Map), dependency graph, computed cache
+│                        - Formula parsing (tokenizer → AST → evaluator)
+│                        - Undo/Redo with full batch support
+│                        - Serialization: exportState() / importState()
+├── App.jsx           ← All UI & state. Handles:
+│                        - Range Selection model (anchor + active)
+│                        - View-layer Sort & Filter (visibleRows useMemo)
+│                        - Clipboard API integration
+│                        - Auto-save to localStorage (debounced useEffect)
+└── App.css           ← Styles for selection highlight, sort indicators,
+                         filter dropdowns
 ```
 
-### 3. Run Development Server
+**Engine is completely decoupled from React.** `App.jsx` holds a single `engine` instance and calls its public API. When the engine state changes, `forceRerender()` increments a `version` counter which invalidates memoized values.
 
-Start the development server with hot module replacement (HMR):
+---
 
-```bash
-npm run dev
-```
+## 📦 Tech Stack
 
-The application will be available at `http://localhost:5173`
+- **React 19** — UI rendering
+- **Vite 7** — Build tool & dev server
+- **Vanilla JS** — Custom formula engine (`core.js`) with zero dependencies
+- **Web Clipboard API** — Native browser clipboard for cross-app paste
+- **Web Storage API** — `localStorage` for persistence
 
-### 4. Build for Production
+---
 
-Create an optimized production build:
+## ⚠️ Known Limitations & Edge Cases Handled
 
-```bash
-npm run build
-```
-
-The build output will be in the `dist/` directory.
-
-### 5. Preview Production Build
-
-Preview the production build locally:
-
-```bash
-npm run preview
-```
-
-### 6. Lint Code
-
-Run ESLint to check for code quality issues:
-
-```bash
-npm run lint
-```
-
-## Project Structure
-
-```
-SpreadsheetApp/
-├── src/
-│   ├── App.jsx           # Main React component
-│   ├── App.css           # Application styles
-│   ├── main.jsx          # Application entry point
-│   ├── index.css         # Global styles
-│   ├── assets/           # Static assets (images, icons, etc.)
-│   └── engine/           # Core application logic
-│       └── core.js       # Engine core functionality
-├── public/               # Static files served as-is
-├── package.json          # Project dependencies and scripts
-├── vite.config.js        # Vite configuration
-├── eslint.config.js      # ESLint configuration
-├── index.html            # HTML entry point
-└── README.md             # This file
-```
-
-## Technologies Used
-
-- **React** - A JavaScript library for building user interfaces
-- **Vite** - A next-generation frontend build tool
-- **ESLint** - JavaScript linting utility
-- **CSS** - Styling and layout
-
-## Available Scripts
-
-| Command | Description |
-|---------|-------------|
-| `npm run dev` | Start the development server with hot reload |
-| `npm run build` | Build the application for production |
-| `npm run preview` | Preview the production build locally |
-| `npm run lint` | Run ESLint to check code quality |
-
-## Development Workflow
-
-1. Create a new branch for your feature:
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
-
-2. Make your changes and ensure the code passes linting:
-   ```bash
-   npm run lint
-   ```
-
-3. Commit your changes:
-   ```bash
-   git commit -m "Add description of your changes"
-   ```
-
-4. Push to your fork and create a Pull Request
-
-## Browser Support
-
-This application works on all modern browsers that support ES2020+ JavaScript:
-
-- Chrome (latest)
-- Firefox (latest)
-- Safari (latest)
-- Edge (latest)
-
-## Troubleshooting
-
-### Dependencies won't install
-- Clear npm cache: `npm cache clean --force`
-- Delete `node_modules` and `package-lock.json`, then reinstall: `rm -rf node_modules package-lock.json && npm install`
-
-### Port 5173 already in use
-- The dev server will automatically try the next available port
-- Or specify a custom port: `npm run dev -- --port 3000`
-
-### Build fails
-- Ensure all dependencies are installed: `npm install`
-- Clear any build cache: `rm -rf dist`
-- Try rebuilding: `npm run build`
-
-
-
-# task_AI_native_Office_intern
+- **Circular references** detected by the dependency graph → displays `#CYCLE!`
+- **Division by zero** → displays `#VALUE!`
+- **Invalid cell references** → displays `#REF!`
+- **Pasting beyond grid bounds** — cells outside the 50×50 grid are silently skipped
+- **`localStorage` quota** — size checked before writing, with console warning if too large
+- **Corrupted storage** — caught by `try/catch`, bad data is cleared on load
+- **Clipboard API permissions denied** — falls back to an internal clipboard for same-tab copy/paste

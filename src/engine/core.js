@@ -184,12 +184,6 @@ function tokenize(expression) {
             continue
         }
 
-        if (char === ':') {
-            tokens.push({ type: 'range', value: ':' })
-            position++
-            continue
-        }
-
         if ((char >= '0' && char <= '9') || char === '.') {
             let numberStr = ''
             while (position < expression.length && ((expression[position] >= '0' && expression[position] <= '9') || expression[position] === '.')) {
@@ -206,8 +200,18 @@ function tokenize(expression) {
                 identifier += expression[position].toUpperCase()
                 position++
             }
+            // If the next char is ':', this is a range start (e.g. A1:A5).
+            // Consume the ':' and the end-cell identifier together so that the
+            // entire range is emitted as a single pre-assembled token.  This
+            // avoids the parser having to pop two queue items when it sees ':'.
             if (position < expression.length && expression[position] === ':') {
-                tokens.push({ type: 'cell', value: identifier })
+                position++ // consume ':'
+                let endIdentifier = ''
+                while (position < expression.length && ((expression[position] >= 'A' && expression[position] <= 'Z') || (expression[position] >= 'a' && expression[position] <= 'z') || (expression[position] >= '0' && expression[position] <= '9'))) {
+                    endIdentifier += expression[position].toUpperCase()
+                    position++
+                }
+                tokens.push({ type: 'range', start: identifier, end: endIdentifier })
             } else {
                 const cellMatch = identifier.match(/^([A-Z]+)(\d+)$/)
                 if (cellMatch) {
@@ -274,13 +278,10 @@ function parseTokensToAST(tokens) {
             }
             position++
         } else if (token.type === 'range') {
-            if (outputQueue.length < 2) throw new Error('Invalid range syntax')
-            const endCell = outputQueue.pop()
-            const startCell = outputQueue.pop()
-            if (startCell.type !== 'cell' || endCell.type !== 'cell') {
-                throw new Error('Range must be between two cell references')
-            }
-            outputQueue.push({ type: 'range', start: startCell.value, end: endCell.value })
+            // Range tokens are pre-assembled by the tokenizer as { type: 'range', start, end }.
+            // Just push them directly — no need to pop two cells from the queue.
+            if (!token.start || !token.end) throw new Error('Invalid range syntax')
+            outputQueue.push(token)
             position++
         } else {
             position++
@@ -824,21 +825,59 @@ export function createEngine(initialRows = 50, initialCols = 50) {
         recalculate()
     }
 
+    // ── Batch Operations (for multi-cell paste as a single undo step) ──
+
+    function executeBatch(operations) {
+        // operations: [{ r, c, value }, ...]
+        // We capture all previous values BEFORE any changes, then make all changes,
+        // and push a single 'batch' entry to the undo stack.
+        if (!operations || operations.length === 0) return
+
+        const previousValues = operations.map(op => ({
+            r: op.r,
+            c: op.c,
+            oldVal: getCellRaw(op.r, op.c).raw,
+            newVal: op.value
+        }))
+
+        // Filter out no-ops
+        const actualChanges = previousValues.filter(op => op.oldVal !== op.newVal)
+        if (actualChanges.length === 0) return
+
+        pushToUndoStack({ type: 'batch', changes: actualChanges })
+
+        for (const op of actualChanges) {
+            setCellRaw(op.r, op.c, op.newVal)
+        }
+        _generation++
+        recalculate()
+    }
+
     function undo() {
         if (undoStack.length === 0) return false
         const entry = undoStack.pop()
 
         if (entry.type === 'set') {
-            // For cell edits, swap current value to redo stack and restore old value
             const currentValue = getCellRaw(entry.r, entry.c).raw
             redoStack.push({ ...entry, newVal: currentValue })
             setCellRaw(entry.r, entry.c, entry.oldVal)
             _generation++
             recalculate()
+        } else if (entry.type === 'batch') {
+            // Undo all changes in the batch in reverse order
+            const redoChanges = entry.changes.map(op => ({
+                r: op.r,
+                c: op.c,
+                oldVal: op.newVal,
+                newVal: getCellRaw(op.r, op.c).raw
+            }))
+            redoStack.push({ type: 'batch', changes: redoChanges })
+            for (const op of entry.changes) {
+                setCellRaw(op.r, op.c, op.oldVal)
+            }
+            _generation++
+            recalculate()
         } else {
-            // For structural changes (row/col insert/delete), save current state to redo
-            // and restore the snapshot from undo entry
-            // Note: The snapshot contains the cell data, but rows/cols must be restored separately
             redoStack.push({
                 ...entry,
                 restoreSnap: takeSnapshot(),
@@ -846,8 +885,6 @@ export function createEngine(initialRows = 50, initialCols = 50) {
                 restoreCols: cols
             })
             restoreSnapshot(entry.snap)
-            // Restore grid dimensions - this must happen after restoreSnapshot
-            // because restoreSnapshot increments _generation but doesn't modify rows/cols
             if (entry.type === 'rowins' || entry.type === 'rowdel') rows = entry.oldRows
             else if (entry.type === 'colins' || entry.type === 'coldel') cols = entry.oldCols
             recalculate()
@@ -863,6 +900,19 @@ export function createEngine(initialRows = 50, initialCols = 50) {
             const currentValue = getCellRaw(entry.r, entry.c).raw
             undoStack.push({ ...entry, oldVal: currentValue })
             setCellRaw(entry.r, entry.c, entry.newVal)
+            _generation++
+            recalculate()
+        } else if (entry.type === 'batch') {
+            const undoChanges = entry.changes.map(op => ({
+                r: op.r,
+                c: op.c,
+                oldVal: op.newVal,
+                newVal: getCellRaw(op.r, op.c).raw
+            }))
+            undoStack.push({ type: 'batch', changes: undoChanges })
+            for (const op of entry.changes) {
+                setCellRaw(op.r, op.c, op.oldVal)
+            }
             _generation++
             recalculate()
         } else {
@@ -885,29 +935,74 @@ export function createEngine(initialRows = 50, initialCols = 50) {
     function getCellForDisplay(row, col) {
         const cell = getCellRaw(row, col)
         const key = cellKey(row, col)
-        // Resolve the computed value (this may trigger recalculation if the cell is dirty)
-        // The resolveCellValue function handles caching and dependency resolution
         const value = resolveCellValue(key)
 
-        // Error values are strings starting with '#' (e.g., '#CYCLE!', '#VALUE!')
         if (typeof value === 'string' && value.startsWith('#')) {
             return { raw: cell.raw, computed: null, error: value }
         }
-        // Return the computed value (which may be a number or string)
-        // Note: Empty cells return '' as computed value, not null
         return { raw: cell.raw, computed: value, error: null }
     }
 
+    // ── Serialization (for localStorage persistence) ──
+
+    const SCHEMA_VERSION = 1
+
+    function exportState() {
+        const serializedCells = {}
+        for (const [key, value] of cells.entries()) {
+            serializedCells[key] = { raw: value.raw }
+        }
+        return {
+            version: SCHEMA_VERSION,
+            rows,
+            cols,
+            cells: serializedCells
+        }
+    }
+
+    function importState(data) {
+        // Validate schema version
+        if (!data || data.version !== SCHEMA_VERSION) {
+            throw new Error('INCOMPATIBLE_VERSION')
+        }
+        if (typeof data.rows !== 'number' || typeof data.cols !== 'number') {
+            throw new Error('INVALID_DIMENSIONS')
+        }
+
+        cells.clear()
+        graph.clear()
+        computedCache.clear()
+        dirtyCells.clear()
+
+        rows = data.rows
+        cols = data.cols
+        _generation++
+
+        for (const [key, value] of Object.entries(data.cells || {})) {
+            if (value && typeof value.raw === 'string') {
+                cells.set(key, { raw: value.raw, computed: null, error: null })
+            }
+        }
+
+        // Rebuild dependency graph
+        for (const [key, value] of cells.entries()) {
+            if (value.raw && value.raw.startsWith('=')) {
+                updateDependencies(key, value.raw)
+            }
+        }
+
+        markAllCellsDirty()
+        recalculate()
+    }
+
     // ── Public API ──
-    // The engine exposes a limited API to prevent direct access to internal state
-    // All cell operations go through the public methods which handle undo/redo,
-    // dependency tracking, and cache invalidation automatically
 
     return {
         get rows() { return rows },
         get cols() { return cols },
         getCell: getCellForDisplay,
         setCell: executeSetCell,
+        batchSetCells: executeBatch,
         insertRow: executeInsertRow,
         deleteRow: executeDeleteRow,
         insertColumn: executeInsertColumn,
@@ -916,7 +1011,7 @@ export function createEngine(initialRows = 50, initialCols = 50) {
         redo,
         canUndo: () => undoStack.length > 0,
         canRedo: () => redoStack.length > 0,
-        // Internal state is not exposed - if you need to serialize/deserialize,
-        // you'll need to work with the public API or add new methods
+        exportState,
+        importState,
     }
 }
