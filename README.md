@@ -4,6 +4,15 @@ A React + Vite spreadsheet with a custom formula engine. This submission impleme
 
 ---
 
+## 🎥 Feature Walkthrough Video
+
+> **📽️ Watch the full recorded explanation of all features implemented:**
+> ### 👉 [Click here to watch the Loom recording](https://www.loom.com/share/c9f196f557dd43eaa5df55cfb119c5fa)
+>
+> This video walks through all three features — Column Sort & Filter, Multi-Cell Copy/Paste, and LocalStorage Persistence — with a live demo and explanation of the key design decisions made during implementation.
+
+---
+
 ## 🚀 Getting Started
 
 ```bash
